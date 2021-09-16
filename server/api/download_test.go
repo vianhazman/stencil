@@ -28,8 +28,6 @@ func TestDownload(t *testing.T) {
 		expectedCode int
 	}{
 		{"should return 400 if name is missing", "", "1.0.1", nil, nil, 400},
-		{"should return 400 if version is invalid", "name1", "invalid", nil, nil, 400},
-		{"should return 404 if version is not found", "name1", "3.3.1", models.ErrSnapshotNotFound, nil, 404},
 		{"should return 500 if finding snapshot fails", "name1", "3.3.1", errors.New("get snapshot fail"), nil, 500},
 		{"should return 500 if download fails", "name1", "1.0.1", nil, downloadFail, 500},
 		{"should return 200 if download succeeded", "name1", "1.0.1", nil, nil, 200},

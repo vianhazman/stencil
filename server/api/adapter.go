@@ -42,5 +42,6 @@ func toFileDownloadRequest(g *stencilv1.DownloadDescriptorRequest) *models.FileD
 		Name:      g.Name,
 		Version:   g.Version,
 		FullNames: g.GetFullnames(),
+		Channel:   g.Channel,
 	}
 }
