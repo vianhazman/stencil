@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -132,17 +133,55 @@ func (r *Store) DeleteSnapshot(ctx context.Context, snapshot *models.Snapshot) e
 
 // PutSchema inserts schema information in DB
 func (r *Store) PutSchema(ctx context.Context, snapshot *models.Snapshot, dbFiles []*models.ProtobufDBFile) error {
-	fmt.Println("hello")
+	var result sql.Result
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	err = tx.QueryRowContext(ctx, snapshotInsertQuery, snapshot.Namespace, snapshot.Name, snapshot.Version).Scan(&snapshot.ID)
+	result, err = tx.ExecContext(ctx, snapshotInsertQuery, snapshot.Namespace, snapshot.Name, snapshot.Version)
 	if err != nil {
 		return err
 	}
+	affectedRows, _ := result.RowsAffected()
+	if affectedRows == 0 {
+		err = tx.QueryRowContext(ctx, `SELECT id FROM snapshots WHERE namespace=$1 AND name=$2 AND version=$3`, snapshot.Namespace, snapshot.Name, snapshot.Version).Scan(&snapshot.ID)
+		if err != nil {
+			return err
+		}
+	} else {
+		snapshot.ID, err = result.LastInsertId()
+		if err != nil {
+			return err
+		}
+	}
+	if err != nil {
+		return err
+	}
+
 	for _, file := range dbFiles {
-		_, err = tx.ExecContext(ctx, fileInsertQuery, snapshot.ID, file.SearchData, file.Data)
+		var fileId int64
+		searchDataJson, err := json.Marshal(file.SearchData)
+		if err != nil {
+			return err
+		}
+
+		result, err = tx.ExecContext(ctx, protobufFileInsertQuery, searchDataJson, file.Data)
+		if err != nil {
+			return err
+		}
+		affectedRows, _ := result.RowsAffected()
+		if affectedRows == 0 {
+			err = tx.QueryRowContext(ctx, `SELECT id FROM protobuf_files WHERE search_data=$1 AND data=$2`, searchDataJson, file.Data).Scan(&fileId)
+			if err != nil {
+				return err
+			}
+		} else {
+			fileId, err = result.LastInsertId()
+			if err != nil {
+				return err
+			}
+		}
+		_, err = tx.ExecContext(ctx, protobufFileSnapshotMappingInsertQuery, snapshot.ID, fileId)
 		if err != nil {
 			return err
 		}
@@ -154,50 +193,42 @@ func (r *Store) PutSchema(ctx context.Context, snapshot *models.Snapshot, dbFile
 // If message names are empty then whole fileDescriptorSet data returned
 func (r *Store) GetSchema(ctx context.Context, snapshot *models.Snapshot, names []string) ([][]byte, error) {
 	var totalData [][]byte
+	var rst *sql.Rows
+	var err error
 	if len(names) > 0 {
-		rst, err := r.db.QueryContext(ctx, getDataForSpecificMessages, snapshot.ID, names)
-		if err != nil {
-			return nil, err
-		}
-		err = rst.Scan(&totalData)
+		rst, err = r.db.QueryContext(ctx, getDataForSpecificMessages, snapshot.ID, names)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		rst, err := r.db.QueryContext(ctx, getWholeFDS, snapshot.ID)
+		rst, err = r.db.QueryContext(ctx, getWholeFDS, snapshot.ID)
 		if err != nil {
 			return nil, err
 		}
-		err = rst.Scan(&totalData)
-		if err != nil {
-			return nil, err
+		for rst.Next() {
+			var data []byte
+			err = rst.Scan(&data)
+			if err != nil {
+				return nil, err
+			}
+			totalData=append(totalData, data)
 		}
 	}
 	return totalData, nil
 }
+const protobufFileInsertQuery = `
+INSERT INTO protobuf_files(search_data, data)
+	VALUES ($2, $3)  ON CONFLICT DO NOTHING
+`
+const protobufFileSnapshotMappingInsertQuery = `
+	INSERT INTO snapshots_protobuf_files(snapshot_id, file_id)
+	VALUES($1, $2) ON CONFLICT DO NOTHING
+`
 
-const fileInsertQuery = `
-WITH file_insert(id) as (
-	INSERT INTO protobuf_files (search_data, data)
-	VALUES ($2, $3) ON CONFLICT DO NOTHING
-	RETURNING id
-),
-file(id) as (
-	SELECT COALESCE(
-			(
-				SELECT id
-				FROM file_insert
-			),
-			(
-				select id
-				from protobuf_files
-				where search_data = $2
-					and data = $3
-			)
-		)
-)
-INSERT INTO snapshots_protobuf_files(snapshot_id, file_id)
-SELECT $1,file.id from file`
+const snapshotInsertQuery = `
+	INSERT INTO snapshots(namespace, name, version)
+    VALUES($1, $2, $3) ON CONFLICT DO NOTHING
+`
 
 const getDataForSpecificMessages = `
 WITH files as (
@@ -222,22 +253,3 @@ SELECT pf.data
 	WHERE spf.snapshot_id = $1
 `
 
-const snapshotInsertQuery = `
-WITH ss(id) as (
-	INSERT INTO snapshots (namespace, name, version)
-	VALUES ($1, $2, $3) ON CONFLICT DO NOTHING
-	RETURNING snapshots.id
-)
-SELECT COALESCE(
-		(
-			select ss.id
-			from ss
-		),
-		(
-			select id
-			from snapshots
-			where namespace = $1
-				and name = $2
-				and version = $3
-		)
-	)`
